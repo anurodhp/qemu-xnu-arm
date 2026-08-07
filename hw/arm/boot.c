@@ -1005,7 +1005,23 @@ static void macho_highest_lowest(struct mach_header_64* mh, uint64_t *lowaddr, u
         switch (cmd->cmd) {
             case LC_SEGMENT_64: {
                 struct segment_command_64* segCmd = (struct segment_command_64*)cmd;
-                if (segCmd->vmaddr < low_addr_temp) {
+                /*
+                 * Zero-sized placeholder segments (e.g. __PRELINK_TEXT on
+                 * this kernel) can have a lower vmaddr than any segment
+                 * that actually holds content, and there's nothing to
+                 * VAtoPA()-place for them anyway. Excluding them keeps
+                 * low_addr_temp anchored to the real lowest segment
+                 * (__TEXT) instead of a phantom address - this matters
+                 * because virt_base is derived from low_addr_temp below,
+                 * and an anomalously-low virt_base can mask down to
+                 * exactly LOW_GLOBAL_BASE_ADDRESS in
+                 * osfmk/arm/pmap.c:pmap_virtual_region(), which makes its
+                 * region_select==2 case return false and short-circuits
+                 * kmem_init()'s reservation loop before it ever reaches
+                 * region_select==3 - the reservation vm_packing_verify_range
+                 * depends on.
+                 */
+                if (segCmd->vmsize > 0 && segCmd->vmaddr < low_addr_temp) {
                     low_addr_temp = segCmd->vmaddr;
                 }
                 if (segCmd->vmaddr + segCmd->vmsize > high_addr_temp) {
