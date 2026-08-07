@@ -17,6 +17,10 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
+#ifdef CONFIG_DARWIN
+#include <pthread.h>
+#include <sys/mman.h>
+#endif
 #include "cpu.h"
 #include "trace.h"
 #include "disas/disas.h"
@@ -168,7 +172,19 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
 #endif /* DEBUG_DISAS */
 
     cpu->can_do_io = !use_icount;
+#if defined(CONFIG_DARWIN) && defined(MAP_JIT)
+    /* code_gen_buffer is MAP_JIT on Apple Silicon: flip to executable
+     * for the duration of the jump into generated code, then back to
+     * writable so tb_gen_code()/direct-jump patching can run again.
+     */
+    pthread_jit_write_protect_np(1);
+#endif
+    fprintf(stderr, "DEBUG about to exec tb_ptr=%p\n", tb_ptr);
     ret = tcg_qemu_tb_exec(env, tb_ptr);
+    fprintf(stderr, "DEBUG exec returned ret=%llx\n", (unsigned long long)ret);
+#if defined(CONFIG_DARWIN) && defined(MAP_JIT)
+    pthread_jit_write_protect_np(0);
+#endif
     cpu->can_do_io = 1;
     last_tb = (TranslationBlock *)(ret & ~TB_EXIT_MASK);
     tb_exit = ret & TB_EXIT_MASK;

@@ -155,6 +155,9 @@ static void bcm2835_aux_write(void *opaque, hwaddr offset, uint64_t value,
     BCM2835AuxState *s = opaque;
     unsigned char ch;
 
+    fprintf(stderr, "DEBUG aux_write offset=%#llx value=%#llx\n",
+            (unsigned long long)offset, (unsigned long long)value);
+
     switch (offset) {
     case AUX_ENABLES:
         if (value != 1) {

@@ -20,6 +20,9 @@
 #include <windows.h>
 #endif
 #include "qemu/osdep.h"
+#ifdef CONFIG_DARWIN
+#include <pthread.h>
+#endif
 
 
 #include "qemu-common.h"
@@ -1037,6 +1040,15 @@ static inline void *alloc_code_gen_buffer(void)
     size_t size = tcg_ctx->code_gen_buffer_size;
     void *buf;
 
+#if defined(CONFIG_DARWIN) && defined(MAP_JIT)
+    /* Apple Silicon enforces W^X on RWX mappings unless MAP_JIT is used;
+     * writability/executability is then toggled per-thread via
+     * pthread_jit_write_protect_np() around each write/exec phase (see
+     * tb_gen_code() and cpu_tb_exec() in cpu-exec.c).
+     */
+    flags |= MAP_JIT;
+#endif
+
     /* Constrain the position of the buffer based on the host cpu.
        Note that these addresses are chosen in concert with the
        addresses assigned in the relevant linker script file.  */
@@ -1067,8 +1079,21 @@ static inline void *alloc_code_gen_buffer(void)
 
     buf = mmap((void *)start, size, prot, flags, -1, 0);
     if (buf == MAP_FAILED) {
+        fprintf(stderr, "DEBUG mmap failed: prot=%d flags=%#x size=%zu errno=%d (%s)\n",
+                prot, flags, size, errno, strerror(errno));
         return NULL;
     }
+
+    fprintf(stderr, "DEBUG mmap ok buf=%p size=%zu\n", buf, size);
+#if defined(CONFIG_DARWIN) && defined(MAP_JIT)
+    /* MAP_JIT pages come back execute-only by default on this thread;
+     * open them for writing since tb_gen_code() writes before anything
+     * ever executes. cpu_tb_exec() toggles this off/on around each
+     * jump into generated code.
+     */
+    pthread_jit_write_protect_np(0);
+    fprintf(stderr, "DEBUG jit write-protect(0) done\n");
+#endif
 
 #ifdef __mips__
     if (cross_256mb(buf, size)) {
@@ -1675,6 +1700,18 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 #endif
     assert_memory_lock();
 
+#if defined(CONFIG_DARWIN) && defined(MAP_JIT)
+    /* pthread_jit_write_protect_np() is per-thread state. The buffer was
+     * opened for writing on whichever thread called alloc_code_gen_buffer()
+     * (the main/init thread), but tb_gen_code() actually runs on the vCPU
+     * thread (created later by qemu_thread_create), which defaults to the
+     * protected/execute-only state. Toggle it here too so this thread can
+     * write; cpu_tb_exec() in cpu-exec.c toggles it back to executable
+     * around each jump into generated code, on that same vCPU thread.
+     */
+    pthread_jit_write_protect_np(0);
+#endif
+
     phys_pc = get_page_addr_code(env, pc);
 
  buffer_overflow:
@@ -1688,6 +1725,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
         cpu_loop_exit(cpu);
     }
 
+    fprintf(stderr, "DEBUG tb_gen_code pc=%llx\n", (unsigned long long)pc);
     gen_code_buf = tcg_ctx->code_gen_ptr;
     tb->tc.ptr = gen_code_buf;
     tb->pc = pc;

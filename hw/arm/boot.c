@@ -693,6 +693,27 @@ static void do_cpu_reset(void *opaque)
                 env->thumb = info->entry & 1;
                 entry &= 0xfffffffe;
             }
+
+            /*
+             * XNU (unlike Linux) never drops its own EL itself - real
+             * hardware/u-boot's bootxnu always hands it EL1 directly.
+             * QEMU's raspi3/raspi3b CPU model resets at EL3 (confirmed
+             * empirically), so without this the macho loader above would
+             * jump straight into XNU's entry point still at EL3, which
+             * start.s doesn't handle. Values below match this repo's own
+             * tools/direct_boot/build.py trampoline (audited against
+             * u-boot's armv8_switch_to_el2_m/armv8_switch_to_el1_m),
+             * setting end-state registers directly instead of physically
+             * executing an EL3->EL2->EL1 ERET chain.
+             */
+            if (env->aarch64 && arm_feature(env, ARM_FEATURE_EL3)) {
+                env->cp15.scr_el3 = 0x5B1;       /* SCR_EL3: RES1|SMD|HCE|NS, RW=1 (AArch64) */
+                if (arm_feature(env, ARM_FEATURE_EL2)) {
+                    env->cp15.hcr_el2 = 0xA0000000; /* HCR_EL2: RW=1 (AArch64 EL1), HCD */
+                }
+                env->cp15.sctlr_el[1] = 0x30D00800; /* SCTLR_EL1 RES1 bits only, MMU off */
+                env->pstate = PSTATE_MODE_EL1h;
+            }
             cpu_set_pc(cs, entry);
         } else {
             /* If we are booting Linux then we need to check whether we are

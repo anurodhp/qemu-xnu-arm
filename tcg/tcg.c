@@ -26,6 +26,9 @@
 #define USE_TCG_OPTIMIZATIONS
 
 #include "qemu/osdep.h"
+#ifdef CONFIG_DARWIN
+#include <sys/mman.h>
+#endif
 
 /* Define to jump the ELF file used to communicate with GDB.  */
 #undef DEBUG_JIT
@@ -684,6 +687,13 @@ void tcg_region_init(void)
     region.end -= page_size;
 
     /* set guard pages */
+#if !(defined(CONFIG_DARWIN) && defined(MAP_JIT))
+    /* Apple Silicon's MAP_JIT mappings can't be independently
+     * reprotected via mprotect() (only toggled whole via
+     * pthread_jit_write_protect_np()), so there's no way to carve out
+     * PROT_NONE guard pages here. Skip them; regions just won't have
+     * an overflow trap on Darwin.
+     */
     for (i = 0; i < region.n; i++) {
         void *start, *end;
         int rc;
@@ -692,6 +702,7 @@ void tcg_region_init(void)
         rc = qemu_mprotect_none(end, page_size);
         g_assert(!rc);
     }
+#endif
 
     tcg_region_trees_init();
 
