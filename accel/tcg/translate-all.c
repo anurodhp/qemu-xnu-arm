@@ -1725,7 +1725,6 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
         cpu_loop_exit(cpu);
     }
 
-    fprintf(stderr, "DEBUG tb_gen_code pc=%llx\n", (unsigned long long)pc);
     gen_code_buf = tcg_ctx->code_gen_ptr;
     tb->tc.ptr = gen_code_buf;
     tb->pc = pc;

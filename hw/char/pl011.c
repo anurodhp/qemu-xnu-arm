@@ -160,8 +160,6 @@ static void pl011_write(void *opaque, hwaddr offset,
     PL011State *s = (PL011State *)opaque;
     unsigned char ch;
 
-    fprintf(stderr, "DEBUG pl011_write offset=%#llx value=%#llx\n",
-            (unsigned long long)offset, (unsigned long long)value);
     trace_pl011_write(offset, value);
 
     switch (offset >> 2) {

@@ -179,9 +179,7 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
      */
     pthread_jit_write_protect_np(1);
 #endif
-    fprintf(stderr, "DEBUG about to exec tb_ptr=%p\n", tb_ptr);
     ret = tcg_qemu_tb_exec(env, tb_ptr);
-    fprintf(stderr, "DEBUG exec returned ret=%llx\n", (unsigned long long)ret);
 #if defined(CONFIG_DARWIN) && defined(MAP_JIT)
     pthread_jit_write_protect_np(0);
 #endif

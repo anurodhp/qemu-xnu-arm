@@ -1049,7 +1049,22 @@ static void macho_add_ramdisk_to_dtb(uint8_t* dtb_data, size_t dtb_size, uint64_
 static uint64_t arm_load_macho(struct arm_boot_info *info, uint64_t *pentry, AddressSpace *as)
 {
     hwaddr kernel_load_offset = 0x00000000;
-    hwaddr mem_base = info->loader_start;
+    /*
+     * info->loader_start defaults to 0 on raspi3 (never set in raspi.c),
+     * which is the real, correct physical RAM base for BCM2837 - but
+     * XNU's osfmk/arm/pmap.c sets vm_first_phys = gPhysBase = boot_args's
+     * physBase during pmap_bootstrap(), and osfmk/arm64/lowmem_vectors.c's
+     * patch_low_glo_static_region() then asserts vm_first_phys != 0,
+     * treating 0 as a sentinel for "never set" - an assumption that holds
+     * on real Apple hardware (RAM never starts at physical 0) but not
+     * here. Load the kernel/dtb/boot_args at the same nonzero physical
+     * base tools/direct_boot/build.py already uses for the same reason
+     * (matches u-boot's real CONFIG_SYS_LOAD_ADDR convention for rpi),
+     * instead of info->loader_start. The tiny EL-drop bootloader stub
+     * itself still goes at info->loader_start (0) - unaffected, still
+     * unused RAM.
+     */
+    hwaddr mem_base = 0x1000000;
 
     uint8_t *data = NULL;
     gsize len;
@@ -1132,7 +1147,18 @@ static uint64_t arm_load_macho(struct arm_boot_info *info, uint64_t *pentry, Add
     uint64_t bootargs_addr = VAtoPA(load_extra_offset);
     uint64_t phys_base = (mem_base + kernel_load_offset);
     uint64_t virt_base = low_addr_temp & ~0x3fffffffull;
-    macho_setup_bootargs(info, as, bootargs_addr, virt_base, phys_base, VAtoPA(load_extra_offset), dtb_address, dtb_size);
+    /*
+     * boot_args.deviceTreeP must be a PHYSICAL address: PE_init_platform()
+     * stashes it raw (pexpert/arm/pe_init.c), then arm_vm_init.c's
+     * PE_slide_devicetree() does `deviceTreeHead += (gVirtBase - gPhysBase)`
+     * to turn it into a KVA - a operation only valid on a real physical
+     * address. dtb_address here is in the kernel's own (virtual-looking)
+     * placement space, not the physical address xnu_dtb was actually
+     * rommed at above (VAtoPA(dtb_address)) - passing it raw caused the
+     * slide to double-apply, producing a bogus KVA and an early
+     * SecureDTLookupEntry translation fault.
+     */
+    macho_setup_bootargs(info, as, bootargs_addr, virt_base, phys_base, VAtoPA(load_extra_offset), VAtoPA(dtb_address), dtb_size);
 
     // write bootloader
     uint32_t fixupcontext[FIXUP_MAX];
