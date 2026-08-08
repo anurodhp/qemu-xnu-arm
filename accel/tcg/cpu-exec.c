@@ -148,6 +148,73 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
     int tb_exit;
     uint8_t *tb_ptr = itb->tc.ptr;
 
+    /* TEMP DIAGNOSTIC: fire exactly when execution reaches `panic`'s own
+     * entry point (a `bl` always ends the caller's TB and starts a new one
+     * here, so x0-x3 are guaranteed to already hold panic()'s real
+     * varargs at this exact point - far more reliable than trying to
+     * reconstruct them after the fact from the panic_trap_to_debugger
+     * secondary fault). xnu-7195-specific VA, re-derive via nm if the
+     * kernel is rebuilt. See project memory. */
+    if (itb->pc == 0xfffffff00782e548ULL) {
+        static int dumped = 0;
+        if (!dumped) {
+            dumped = 1;
+            fprintf(stderr, "DIAG: panic() called! x0=0x%" PRIx64 " x1=0x%" PRIx64
+                    " x2=0x%" PRIx64 " x3=0x%" PRIx64 " x30(lr)=0x%" PRIx64 " sp=0x%" PRIx64 "\n",
+                    env->xregs[0], env->xregs[1], env->xregs[2], env->xregs[3], env->xregs[30], env->xregs[31]);
+            char msg[256];
+            memset(msg, 0, sizeof(msg));
+            cpu_memory_rw_debug(cpu, env->xregs[0], (uint8_t *)msg, sizeof(msg) - 1, 0);
+            fprintf(stderr, "DIAG: panic fmt string: %s\n", msg);
+            /* real varargs are stack-marshaled (stp x8,x9,[sp]) at this
+             * call site, not passed in x1/x2 - dump a chunk of stack. */
+            {
+                uint64_t stackvals[8] = {0};
+                cpu_memory_rw_debug(cpu, env->xregs[31], (uint8_t *)stackvals, sizeof(stackvals), 0);
+                int si;
+                for (si = 0; si < 8; si++) {
+                    fprintf(stderr, "DIAG: [sp+0x%x] = 0x%" PRIx64 "\n", si * 8, stackvals[si]);
+                }
+            }
+            /* TEMP DIAGNOSTIC: dump the whole DTB physical region as it
+             * exists in guest memory *at panic time* - checking for
+             * corruption vs. a genuine parse-logic bug. DTRootNode
+             * physical base is xnu-7195-specific/loader-layout-dependent,
+             * re-derive from the earlier DTRootNode diagnostic if needed. */
+            {
+                hwaddr dtbbase = 0x8cbc000;
+                uint8_t buf[0x920];
+                int gi;
+                cpu_physical_memory_read(dtbbase, buf, sizeof(buf));
+                fprintf(stderr, "DIAG: dtb phys @0x%" PRIx64 " (%zu bytes):",
+                        (uint64_t)dtbbase, sizeof(buf));
+                for (gi = 0; gi < (int)sizeof(buf); gi++) {
+                    if (gi % 32 == 0) fprintf(stderr, "\nDIAG: +0x%03x:", gi);
+                    fprintf(stderr, "%02x", buf[gi]);
+                }
+                fprintf(stderr, "\n");
+            }
+            /* TEMP DIAGNOSTIC: read device_tree.c's unambiguous single-slot
+             * "last call" trace (last_assert_p/start/end/line, all
+             * volatile) - unconditionally overwritten on every
+             * assert_in_dt_region call, no ring/idx contention, so this
+             * always reflects exactly the call that's about to panic.
+             * xnu-7195-specific VAs, re-derive via nm if the kernel is
+             * rebuilt. */
+            {
+                uint64_t pv = 0, startv = 0, endv = 0;
+                uint32_t linev = 0;
+                cpu_memory_rw_debug(cpu, 0xfffffff0078e7398ULL, (uint8_t *)&pv, 8, 0);
+                cpu_memory_rw_debug(cpu, 0xfffffff0078e73a0ULL, (uint8_t *)&startv, 8, 0);
+                cpu_memory_rw_debug(cpu, 0xfffffff0078e73a8ULL, (uint8_t *)&endv, 8, 0);
+                cpu_memory_rw_debug(cpu, 0xfffffff0078e73b0ULL, (uint8_t *)&linev, 4, 0);
+                fprintf(stderr, "DIAG: last_assert p=0x%" PRIx64 " start=0x%" PRIx64
+                        " end=0x%" PRIx64 " site_line=%u\n", pv, startv, endv, linev);
+            }
+            fflush(stderr);
+        }
+    }
+
     qemu_log_mask_and_addr(CPU_LOG_EXEC, itb->pc,
                            "Trace %d: %p ["
                            TARGET_FMT_lx "/" TARGET_FMT_lx "/%#x] %s\n",

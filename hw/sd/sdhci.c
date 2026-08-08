@@ -374,6 +374,10 @@ static void sdhci_send_command(SDHCIState *s)
 
     sdhci_update_irq(s);
 
+    /* TEMP DIAGNOSTIC */
+    fprintf(stderr, "DIAG sdhci_send_command: cmd=%d blksize=%#x DATA_PRESENT=%d rlen=%d\n",
+            request.cmd, s->blksize, (s->cmdreg & SDHC_CMD_DATA_PRESENT) != 0, rlen);
+
     if (s->blksize && (s->cmdreg & SDHC_CMD_DATA_PRESENT)) {
         s->data_count = 0;
         sdhci_data_transfer(s);
@@ -445,6 +449,9 @@ static void sdhci_read_block_from_card(SDHCIState *s)
     if (s->norintstsen & SDHC_NISEN_RBUFRDY) {
         s->norintsts |= SDHC_NIS_RBUFRDY;
     }
+    /* TEMP DIAGNOSTIC */
+    fprintf(stderr, "DIAG read_block_from_card: norintstsen=%#x norintsts(after)=%#x\n",
+            s->norintstsen, s->norintsts);
 
     /* Clear DAT line active status if that was the last block */
     if ((s->trnmod & SDHC_TRNS_MULTI) == 0 ||
@@ -901,6 +908,10 @@ static void sdhci_do_adma(SDHCIState *s)
 static void sdhci_data_transfer(void *opaque)
 {
     SDHCIState *s = (SDHCIState *)opaque;
+
+    /* TEMP DIAGNOSTIC */
+    fprintf(stderr, "DIAG sdhci_data_transfer: trnmod=%#x cmdreg=%#x blksize=%#x blkcnt=%u data_ready=%d\n",
+            s->trnmod, s->cmdreg, s->blksize, s->blkcnt, sdbus_data_ready(&s->sdbus));
 
     if (s->trnmod & SDHC_TRNS_DMA) {
         switch (SDHC_DMA_TYPE(s->hostctl1)) {

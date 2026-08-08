@@ -661,6 +661,37 @@ static void do_cpu_reset(void *opaque)
     cpu_reset(cs);
     if (info) {
         if (!info->is_linux) {
+            /*
+             * TEMP DIAGNOSTIC / COMPAT: unlike the is_linux branch below
+             * (which explicitly gates the real entry jump on cs==first_cpu
+             * and parks every other core via secondary_cpu_reset_hook),
+             * this branch used to unconditionally run this whole block -
+             * including cpu_set_pc(cs, entry) - for EVERY CPU. On raspi3
+             * (4 cores) that meant all 4 cores jumped into XNU's entry
+             * point simultaneously, racing on the same early-boot global
+             * state (DTRootNode/DTEnd/etc, all written non-atomically
+             * before any locking exists) - confirmed via a QEMU-side abort
+             * hook showing cpu_index=1 faulting on a bad instruction fetch
+             * at PC=FAR=0x...78c1570 (translation fault) while every
+             * device-tree diagnostic global still read zero, i.e. before
+             * CPU0 had even reached device-tree init. This is the leading
+             * suspect for xnu-7195 bug #3 (the "8-byte device-tree
+             * node-pointer drift") - it explains the documented run-to-run
+             * nondeterminism and the same symptom appearing at multiple,
+             * independently-verified-correct call sites (concurrent
+             * writers to shared globals, not a single function's logic
+             * bug). See project memory. Real hardware/u-boot's bootxnu
+             * only ever starts CPU0 this early - secondary cores stay
+             * parked (spinning on the BCM2837 local_intc mailbox wake
+             * registers) until XNU explicitly wakes them for real SMP
+             * bring-up, much later. Mirror that here: non-boot cores are
+             * halted (cs->halted = 1, the same mechanism PSCI CPU_OFF/
+             * arm-powerctl.c uses) instead of racing into the kernel.
+             */
+            if (cs != first_cpu) {
+                cs->halted = 1;
+                return;
+            }
             int i;
             /* Jump to the entry point.  */
             uint64_t entry = info->entry;
@@ -945,7 +976,16 @@ static uint64_t load_aarch64_image(const char *filename, hwaddr mem_base,
 // pexpert/pexpert/arm64/boot.h
 #define xnu_arm64_kBootArgsRevision2		2	/* added boot_args.bootFlags */
 #define xnu_arm64_kBootArgsVersion2		2
-#define xnu_arm64_BOOT_LINE_LENGTH        256
+/* xnu-7195's pexpert/pexpert/arm64/boot.h raised BOOT_LINE_LENGTH from 256
+ * to 608 (room for iBoot's encoded system-token env var) - this struct
+ * must match exactly, since the kernel's arm_init() does a flat
+ * `const_boot_args = *args` struct-copy of sizeof(boot_args) (0x2e0 = 736
+ * bytes with 608) starting right after this blob. With the old 256 value
+ * (yielding a 384-byte struct here), that copy read 352 bytes past what
+ * QEMU actually wrote via rom_add_blob_fixed_as, straight into unmapped
+ * guest physical memory - a data abort in memcpy at arm_init.c:306. See
+ * project memory for the full root-cause writeup. */
+#define xnu_arm64_BOOT_LINE_LENGTH        608
 struct xnu_arm64_Boot_Video {
 	unsigned long	v_baseAddr;	/* Base address of video memory */
 	unsigned long	v_display;	/* Display Code (if Applicable */
