@@ -8327,6 +8327,17 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
                     }
                 }
                 fflush(stderr);
+
+                /* TEMP DIAGNOSTIC: freeze the VM right here instead of
+                 * letting the guest keep running past the captured fault.
+                 * Without this, every monitor query issued after the
+                 * fprintf dump above (even within the same run) races
+                 * ahead of the guest and reads live, moved-on state, not
+                 * fault-time state - this was misread as real run-to-run
+                 * nondeterminism in earlier bug investigations. Guarded by
+                 * the same first-fault-only `dumped` latch. See project
+                 * memory (bug #7). */
+                vm_stop(RUN_STATE_DEBUG);
             }
         }
         /* fall through */
