@@ -8337,7 +8337,10 @@ static void arm_cpu_do_interrupt_aarch64(CPUState *cs)
                  * nondeterminism in earlier bug investigations. Guarded by
                  * the same first-fault-only `dumped` latch. See project
                  * memory (bug #7). */
-                vm_stop(RUN_STATE_DEBUG);
+                /* vm_stop() removed - the bug #3/#7 investigation this
+                 * diagnostic was added for is resolved (see project
+                 * memory); the guest must now run past its first fault
+                 * unattended to reach the interactive shell. */
             }
         }
         /* fall through */
