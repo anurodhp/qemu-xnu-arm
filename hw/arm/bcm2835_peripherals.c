@@ -117,6 +117,18 @@ static void bcm2835_peripherals_init(Object *obj)
                                    OBJECT(&s->sdhci.sdbus), &error_abort);
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhost",
                                    OBJECT(&s->sdhost.sdbus), &error_abort);
+
+    /* DWC2 USB 2.0 OTG host controller (backported from QEMU 5.2, see
+     * hw/usb/hcd-dwc2.c). Its bus-master DMA sees the VC/GPU bus view of
+     * memory, exactly like the DMA controller above - the guest programs
+     * HCDMA with bus addresses (0xC0000000-based), not ARM physical ones.
+     */
+    object_initialize(&s->dwc2, sizeof(s->dwc2), TYPE_DWC2_USB);
+    object_property_add_child(obj, "dwc2", OBJECT(&s->dwc2), NULL);
+    qdev_set_parent_bus(DEVICE(&s->dwc2), sysbus_get_default());
+
+    object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
+                                   OBJECT(&s->gpu_bus_mr), &error_abort);
 }
 
 static void bcm2835_peripherals_realize(DeviceState *dev, Error **errp)
@@ -298,6 +310,19 @@ static void bcm2835_peripherals_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhost), 0,
         qdev_get_gpio_in_named(DEVICE(&s->ic), BCM2835_IC_GPU_IRQ,
                                INTERRUPT_SDIO));
+
+    /* DWC2 USB */
+    object_property_set_bool(OBJECT(&s->dwc2), true, "realized", &err);
+    if (err) {
+        error_propagate(errp, err);
+        return;
+    }
+
+    memory_region_add_subregion(&s->peri_mr, USB_OFFSET,
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->dwc2), 0));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->dwc2), 0,
+        qdev_get_gpio_in_named(DEVICE(&s->ic), BCM2835_IC_GPU_IRQ,
+                               INTERRUPT_USB));
 
     /* DMA Channels */
     object_property_set_bool(OBJECT(&s->dma), true, "realized", &err);
