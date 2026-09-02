@@ -662,7 +662,10 @@ static void do_cpu_reset(void *opaque)
     if (info) {
         if (!info->is_linux) {
             /*
-             * TEMP DIAGNOSTIC / COMPAT: unlike the is_linux branch below
+             * COMPAT: real, permanent behavior - not diagnostic-only,
+             * despite this comment's original "TEMP DIAGNOSTIC / COMPAT"
+             * label (relabeled 2026-09-01; the fix below is load-bearing
+             * and stays). Unlike the is_linux branch below
              * (which explicitly gates the real entry jump on cs==first_cpu
              * and parks every other core via secondary_cpu_reset_hook),
              * this branch used to unconditionally run this whole block -
