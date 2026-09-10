@@ -88,6 +88,18 @@ enum usbstring_idx {
 #define USB_CDC_SET_ETHERNET_PACKET_FILTER	0x43
 #define USB_CDC_GET_ETHERNET_STATISTIC		0x44
 
+/*
+ * Notifications the device sends up the interrupt (status) endpoint.
+ * USB CDC 1.2 table 20; the two Ethernet ones are ECM 1.2 sections
+ * 3.8.1 (NETWORK_CONNECTION) and 3.8.2 (CONNECTION_SPEED_CHANGE).
+ */
+#define USB_CDC_NOTIFY_NETWORK_CONNECTION	0x00
+#define USB_CDC_NOTIFY_RESPONSE_AVAILABLE	0x01
+#define USB_CDC_NOTIFY_SPEED_CHANGE		0x2a
+
+/* bmRequestType of a notification: device-to-host, class, interface. */
+#define USB_CDC_NOTIFY_REQUESTTYPE		0xa1
+
 #define LOG2_STATUS_INTERVAL_MSEC	5    /* 1 << 5 == 32 msec */
 #define STATUS_BYTECOUNT		16   /* 8 byte header + data */
 
@@ -627,10 +639,30 @@ struct rndis_response {
     uint8_t buf[0];
 };
 
+/*
+ * What the CDC-ECM status endpoint still owes the host. A CDC-ECM host
+ * driver has no register to poll for link state: the ONLY way it learns
+ * the link is up is a NETWORK_CONNECTION notification on the interrupt
+ * endpoint, so the device has to volunteer one. Ordering is per ECM 1.2
+ * s3.8.2, which says the device SHOULD send CONNECTION_SPEED_CHANGE
+ * before announcing the connection is up -- and that is not cosmetic
+ * here: Apple's AppleUSBCDCECMData::setLinkStatusUp() computes
+ * max(fUpSpeed, fDownSpeed) / 1000000 and, on 0, puts the link straight
+ * back down. NETWORK_CONNECTION on its own therefore does not bring an
+ * Apple CDC-ECM host up.
+ */
+enum cdc_notify_state {
+    CDC_NOTIFY_NONE = 0,
+    CDC_NOTIFY_SPEED,
+    CDC_NOTIFY_CONNECT,
+};
+
 typedef struct USBNetState {
     USBDevice dev;
 
     enum rndis_state rndis_state;
+    enum cdc_notify_state cdc_notify;
+    bool cdc_connected;
     uint32_t medium;
     uint32_t speed;
     uint32_t media_state;
@@ -1059,6 +1091,52 @@ static int rndis_parse(USBNetState *s, uint8_t *data, int length)
 
 static void usb_net_handle_reset(USBDevice *dev)
 {
+    USBNetState *s = (USBNetState *) dev;
+
+    /*
+     * A bus reset drops the host's whole view of the device, so the CDC
+     * link state and the packet filter it set have to go with it -- the
+     * host will re-select a configuration and re-announce what it wants.
+     * Leaving cdc_connected set here would mean a re-enumerated device
+     * never re-sends NETWORK_CONNECTION, because nothing would look like
+     * a state change any more.
+     */
+    s->cdc_notify = CDC_NOTIFY_NONE;
+    s->cdc_connected = false;
+    s->filter = 0;
+}
+
+/*
+ * Arm the CDC-ECM notification sequence. Always re-arms rather than
+ * checking for an actual change: the host driver ignores a repeat (it
+ * compares against its own last-known state), whereas a missed one leaves
+ * the interface down forever, and both of this function's callers are
+ * points where the host has just told us it is listening.
+ */
+static void usb_net_cdc_set_link(USBNetState *s, bool connected)
+{
+    s->cdc_connected = connected;
+    s->cdc_notify = connected ? CDC_NOTIFY_SPEED : CDC_NOTIFY_CONNECT;
+    if (s->intr) {
+        usb_wakeup(s->intr, 0);
+    }
+}
+
+/*
+ * CDC-ECM keeps the data interface's endpoints on alternate setting 1 and
+ * leaves alt 0 endpoint-less (ECM 1.2 s3.3), so the host selecting alt 1
+ * is it saying "I am ready to move frames" -- the same point Linux's own
+ * ECM gadget arms its notification from (f_ecm.c, ecm_set_alt()).
+ */
+static void usb_net_set_interface(USBDevice *dev, int interface,
+                                  int alt_old, int alt_new)
+{
+    USBNetState *s = (USBNetState *) dev;
+
+    if (is_rndis(s) || interface != 1) {
+        return;
+    }
+    usb_net_cdc_set_link(s, alt_new != 0);
 }
 
 static void usb_net_handle_control(USBDevice *dev, USBPacket *p,
@@ -1118,6 +1196,48 @@ static void usb_net_handle_control(USBDevice *dev, USBPacket *p,
 #endif
         break;
 
+    case ClassInterfaceOutRequest | USB_CDC_SET_ETHERNET_PACKET_FILTER:
+        /*
+         * Mandatory in CDC-ECM (ECM 1.2 s6.2.4): the host sets the filter
+         * before it expects a single frame, so stalling this request stops
+         * the interface dead. Apple's AppleUSBCDCECMData issues it from
+         * enable() with kPACKET_TYPE_DIRECTED|BROADCAST|MULTICAST (0x1c).
+         *
+         * wValue carries the filter bits and there is no data stage. This
+         * model has no hardware filter and hands the guest every frame it
+         * receives -- which is allowed, since the filter is a hint the host
+         * still enforces in software -- so recording the value is all that
+         * is required of us. A zero filter is the host disabling reception
+         * (Apple's disable() does exactly that), which is a link-down.
+         */
+        if (is_rndis(s) || index != 0) {
+            goto fail;
+        }
+        s->filter = value;
+        usb_net_cdc_set_link(s, value != 0);
+        break;
+
+    case ClassInterfaceOutRequest | USB_CDC_SET_ETHERNET_MULTICAST_FILTERS:
+        /*
+         * wValue is the number of 6-byte addresses in the data stage. This
+         * model advertises wNumberMCFilters == 0 in its Ethernet functional
+         * descriptor -- "no multicast filtering, the device passes
+         * everything up" -- so there is nothing to program and the correct
+         * answer to a request to install none of them is success, not a
+         * stall.
+         *
+         * A host is not supposed to ask at all when the descriptor says
+         * zero, but Apple's AppleUSBCDCECMControl::USBSetMulticastFilter()
+         * guards with `count > fMcFilters`, which lets count == 0 through
+         * and issues a zero-length request -- so this really is on the path
+         * to link-up, not a theoretical case. Reject a request to actually
+         * install filters, which is what zero advertised filters means.
+         */
+        if (is_rndis(s) || index != 0 || value != 0) {
+            goto fail;
+        }
+        break;
+
     default:
     fail:
         fprintf(stderr, "usbnet: failed control transaction: "
@@ -1126,6 +1246,63 @@ static void usb_net_handle_control(USBDevice *dev, USBPacket *p,
         p->status = USB_RET_STALL;
         break;
     }
+}
+
+/*
+ * Emit one pending CDC-ECM notification, or NAK when there is nothing to
+ * say -- which is what an idle interrupt endpoint does. Laid out byte by
+ * byte rather than through a packed struct because the header is defined
+ * in little-endian wire order (USB CDC 1.2 table 20) and this file has no
+ * such struct.
+ */
+static void usb_net_handle_statusin_cdc(USBNetState *s, USBPacket *p)
+{
+    uint8_t buf[STATUS_BYTECOUNT];
+    unsigned int len;
+
+    memset(buf, 0, sizeof(buf));
+    buf[0] = USB_CDC_NOTIFY_REQUESTTYPE;
+    /* wIndex (buf[4..5]) is the control interface, which is 0 here. */
+
+    switch (s->cdc_notify) {
+    case CDC_NOTIFY_SPEED:
+        /*
+         * Two le32 bitrates, upstream then downstream, in bits/second.
+         * s->speed is the NDIS OID_GEN_LINK_SPEED unit (100 bits/s), so
+         * 1000000 * 100 == 100 Mbit/s, matching the descriptor's claim.
+         */
+        len = 16;
+        if (p->iov.size < len) {
+            /*
+             * Cannot truncate a notification -- the host would read a
+             * short, malformed one. Drop this one and move on rather than
+             * blocking the sequence behind an endpoint that cannot carry
+             * it; the connect notification below is the load-bearing half.
+             */
+            s->cdc_notify = CDC_NOTIFY_CONNECT;
+            p->status = USB_RET_NAK;
+            return;
+        }
+        buf[1] = USB_CDC_NOTIFY_SPEED_CHANGE;
+        buf[6] = 8;                             /* wLength */
+        stl_le_p(buf + 8, s->speed * 100);      /* upstream   bits/s */
+        stl_le_p(buf + 12, s->speed * 100);     /* downstream bits/s */
+        s->cdc_notify = CDC_NOTIFY_CONNECT;
+        break;
+
+    case CDC_NOTIFY_CONNECT:
+        len = 8;
+        buf[1] = USB_CDC_NOTIFY_NETWORK_CONNECTION;
+        buf[2] = s->cdc_connected ? 1 : 0;      /* wValue: 1 == connected */
+        s->cdc_notify = CDC_NOTIFY_NONE;
+        break;
+
+    default:
+        p->status = USB_RET_NAK;
+        return;
+    }
+
+    usb_packet_copy(p, buf, len);
 }
 
 static void usb_net_handle_statusin(USBNetState *s, USBPacket *p)
@@ -1137,11 +1314,15 @@ static void usb_net_handle_statusin(USBNetState *s, USBPacket *p)
         return;
     }
 
-    buf[0] = cpu_to_le32(1);
-    buf[1] = cpu_to_le32(0);
-    usb_packet_copy(p, buf, 8);
-    if (!s->rndis_resp.tqh_first) {
-        p->status = USB_RET_NAK;
+    if (!is_rndis(s)) {
+        usb_net_handle_statusin_cdc(s, p);
+    } else {
+        buf[0] = cpu_to_le32(USB_CDC_NOTIFY_RESPONSE_AVAILABLE);
+        buf[1] = cpu_to_le32(0);
+        usb_packet_copy(p, buf, 8);
+        if (!s->rndis_resp.tqh_first) {
+            p->status = USB_RET_NAK;
+        }
     }
 
 #ifdef TRAFFIC_DEBUG
@@ -1348,6 +1529,8 @@ static void usb_net_realize(USBDevice *dev, Error **errrp)
     usb_desc_init(dev);
 
     s->rndis_state = RNDIS_UNINITIALIZED;
+    s->cdc_notify = CDC_NOTIFY_NONE;
+    s->cdc_connected = false;
     QTAILQ_INIT(&s->rndis_resp);
 
     s->medium = 0;	/* NDIS_MEDIUM_802_3 */
@@ -1403,6 +1586,7 @@ static void usb_net_class_initfn(ObjectClass *klass, void *data)
     uc->handle_reset   = usb_net_handle_reset;
     uc->handle_control = usb_net_handle_control;
     uc->handle_data    = usb_net_handle_data;
+    uc->set_interface  = usb_net_set_interface;
     uc->unrealize      = usb_net_unrealize;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->fw_name = "network";
