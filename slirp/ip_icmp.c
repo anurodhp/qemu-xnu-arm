@@ -420,7 +420,47 @@ void icmp_receive(struct socket *so)
     icp = mtod(m, struct icmp *);
 
     id = icp->icmp_id;
-    len = qemu_recv(so->s, icp, m->m_len, 0);
+    /*
+     * Room, not m->m_len: on some hosts (see the Darwin block below) the
+     * datagram that arrives is longer than the ICMP message that was sent,
+     * and reading only m->m_len bytes of it silently truncates the tail.
+     */
+    len = qemu_recv(so->s, icp, M_ROOM(m), 0);
+#ifdef __APPLE__
+    /*
+     * Darwin's SOCK_DGRAM/IPPROTO_ICMP socket behaves like a raw socket:
+     * recv() hands back the whole datagram INCLUDING its IP header, unlike
+     * Linux, where the buffer starts at the ICMP header.  Verified directly
+     * on the host, not assumed: a 56-byte echo request to 8.8.8.8 comes back
+     * as 76 bytes beginning "45 00 ...", i.e. IP header first.
+     *
+     * Without this strip, everything downstream still "works" and is wrong in
+     * ways that look like a guest bug: icmp_reflect() below force-sets
+     * icmp_type = ICMP_ECHOREPLY, and icp->icmp_id is restored just above, so
+     * the guest accepts the packet -- but its icmp_seq comes from the host
+     * reply's ip_off field (always 0, so every reply looks like a duplicate of
+     * sequence 0), and its payload is the real payload shifted right by the
+     * 20-byte header, so a guest ping reports a garbage round-trip time and
+     * "wrong data byte #8" (DAR-322).
+     */
+    if (len >= (int)sizeof(struct ip)) {
+        struct ip *rip = (struct ip *)icp;
+        int rhlen = rip->ip_hl << 2;
+
+        if (rip->ip_v == IPVERSION && rhlen >= (int)sizeof(struct ip) &&
+            rhlen <= len) {
+            len -= rhlen;
+            memmove(icp, (char *)icp + rhlen, len);
+        }
+    }
+#endif
+    /*
+     * m->m_len is deliberately left alone: icmp_reflect() below sends exactly
+     * that many bytes back and never touches ip->ip_len, i.e. the reply is
+     * assumed to be the same length as the request that opened this socket --
+     * true of a real echo reply, and unchanged by this fix.  len is only read
+     * below to tell a failed recv from a successful one.
+     */
     icp->icmp_id = id;
 
     m->m_data -= hlen;
