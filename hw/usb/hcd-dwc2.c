@@ -585,6 +585,11 @@ static void dwc2_work_bh(void *opaque)
 
     do {
         p = &s->packet[chan];
+        /* Never service a channel the guest has disabled (DAR-371) */
+        if (p->needs_service &&
+            !(s->hreg1[chan * 8] & HCCHAR_CHENA)) {
+            p->needs_service = false;
+        }
         if (p->needs_service) {
             dev = dwc2_find_device(s, p->devadr);
             ep = usb_ep_get(dev, p->pid, p->epnum);
@@ -606,6 +611,21 @@ static void dwc2_work_bh(void *opaque)
         timer_mod(s->frame_timer, expire_time);
     }
     s->working = false;
+}
+
+/* Forget a channel's outstanding packet: see the disflg case in dwc2_hreg1_write() */
+static void dwc2_cancel_chan(DWC2State *s, uint32_t chan)
+{
+    DWC2Packet *p = &s->packet[chan];
+
+    p->needs_service = false;
+    if (p->async == DWC2_ASYNC_INFLIGHT) {
+        if (usb_packet_is_inflight(&p->packet)) {
+            usb_cancel_packet(&p->packet);
+        }
+        usb_packet_cleanup(&p->packet);
+    }
+    p->async = DWC2_ASYNC_NONE;
 }
 
 static void dwc2_enable_chan(DWC2State *s,  uint32_t index)
@@ -1042,6 +1062,20 @@ static void dwc2_hreg1_write(void *ptr, hwaddr addr, int index, uint64_t val,
     *mmio = val;
 
     if (disflg) {
+        /*
+         * The guest halted the channel. Real silicon stops issuing tokens
+         * for a disabled channel. The model has to stop too: a NAKed
+         * ctrl/bulk packet is left with needs_service set (see
+         * dwc2_handle_packet()), and dwc2_work_bh() would keep retrying it
+         * on the frame timer, using whatever the guest programs into this
+         * channel's registers next. If the device then answers, the data is
+         * DMA'd to a target the guest has stopped watching (a lost packet),
+         * or into a transfer the guest has since set up for a different
+         * endpoint (seen as an 8-byte CDC notification delivered as an
+         * Ethernet frame). DAR-371.
+         */
+        dwc2_cancel_chan(s, index >> 3);
+
         /* set ChHltd in HCINT */
         s->hreg1[(index & ~7) + 2] |= HCINTMSK_CHHLTD;
         iflg = 1;
