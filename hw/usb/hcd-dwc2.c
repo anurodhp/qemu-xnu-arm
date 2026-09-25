@@ -220,6 +220,23 @@ static const char *dirs[] = {
     "Out", "In"
 };
 
+/*
+ * No device answers at this address (e.g. it was unplugged). Real DWC2
+ * silicon sees the transaction time out and halts the channel with XACTERR
+ * (observed on a Raspberry Pi 3 after unplugging a keyboard: HCINT=0x82).
+ * Returning with the channel still enabled, as this model used to, leaves
+ * the guest waiting for a halt that never comes.
+ */
+static void dwc2_chan_no_device(DWC2State *s, uint32_t index)
+{
+    DWC2Packet *p = &s->packet[index >> 3];
+
+    s->hreg1[index] &= ~HCCHAR_CHENA;
+    s->hreg1[index + 2] |= HCINTMSK_XACTERR | HCINTMSK_CHHLTD;
+    p->needs_service = false;
+    dwc2_update_hc_irq(s, index);
+}
+
 static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
                                USBEndpoint *ep, uint32_t index, bool send)
 {
@@ -592,11 +609,17 @@ static void dwc2_work_bh(void *opaque)
         }
         if (p->needs_service) {
             dev = dwc2_find_device(s, p->devadr);
+            if (dev == NULL) {
+                dwc2_chan_no_device(s, p->index);
+                found = true;
+                goto next_chan;
+            }
             ep = usb_ep_get(dev, p->pid, p->epnum);
             trace_usb_dwc2_work_bh_service(s->next_chan, chan, dev, p->epnum);
             dwc2_handle_packet(s, p->devadr, dev, ep, p->index, true);
             found = true;
         }
+next_chan:
         if (++chan == DWC2_NB_CHAN) {
             chan = 0;
         }
@@ -652,6 +675,7 @@ static void dwc2_enable_chan(DWC2State *s,  uint32_t index)
 
     trace_usb_dwc2_enable_chan(index >> 3, dev, &p->packet, epnum);
     if (dev == NULL) {
+        dwc2_chan_no_device(s, index);
         return;
     }
 
