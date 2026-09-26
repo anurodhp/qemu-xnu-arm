@@ -663,6 +663,7 @@ typedef struct USBNetState {
     enum rndis_state rndis_state;
     enum cdc_notify_state cdc_notify;
     bool cdc_connected;
+    bool cdc_host_ready;    /* host selected alt 1 / set a non-zero filter */
     uint32_t medium;
     uint32_t speed;
     uint32_t media_state;
@@ -1103,6 +1104,7 @@ static void usb_net_handle_reset(USBDevice *dev)
      */
     s->cdc_notify = CDC_NOTIFY_NONE;
     s->cdc_connected = false;
+    s->cdc_host_ready = false;
     s->filter = 0;
 }
 
@@ -1113,12 +1115,35 @@ static void usb_net_handle_reset(USBDevice *dev)
  * the interface down forever, and both of this function's callers are
  * points where the host has just told us it is listening.
  */
-static void usb_net_cdc_set_link(USBNetState *s, bool connected)
+static void usb_net_cdc_update_link(USBNetState *s)
 {
+    bool connected = s->cdc_host_ready &&
+                     !qemu_get_queue(s->nic)->link_down;
+
     s->cdc_connected = connected;
     s->cdc_notify = connected ? CDC_NOTIFY_SPEED : CDC_NOTIFY_CONNECT;
     if (s->intr) {
         usb_wakeup(s->intr, 0);
+    }
+}
+
+/*
+ * The link the host sees is up only while the host is ready for frames
+ * AND the backend link is up, so the monitor's `set_link <id> off|on`
+ * reaches the guest as a real cable pull / plug-in.
+ */
+static void usb_net_cdc_set_link(USBNetState *s, bool host_ready)
+{
+    s->cdc_host_ready = host_ready;
+    usb_net_cdc_update_link(s);
+}
+
+static void usbnet_link_status_changed(NetClientState *nc)
+{
+    USBNetState *s = qemu_get_nic_opaque(nc);
+
+    if (!is_rndis(s)) {
+        usb_net_cdc_update_link(s);
     }
 }
 
@@ -1519,6 +1544,7 @@ static NetClientInfo net_usbnet_info = {
     .size = sizeof(NICState),
     .receive = usbnet_receive,
     .cleanup = usbnet_cleanup,
+    .link_status_changed = usbnet_link_status_changed,
 };
 
 static void usb_net_realize(USBDevice *dev, Error **errrp)
