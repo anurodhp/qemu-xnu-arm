@@ -90,6 +90,11 @@ static void bcm2835_peripherals_init(Object *obj)
     object_property_add_child(obj, "rng", OBJECT(&s->rng), NULL);
     qdev_set_parent_bus(DEVICE(&s->rng), sysbus_get_default());
 
+    /* Power management (reset and halt through the PM watchdog) */
+    object_initialize(&s->powermgt, sizeof(s->powermgt), TYPE_BCM2835_POWERMGT);
+    object_property_add_child(obj, "powermgt", OBJECT(&s->powermgt), NULL);
+    qdev_set_parent_bus(DEVICE(&s->powermgt), sysbus_get_default());
+
     /* Extended Mass Media Controller */
     object_initialize(&s->sdhci, sizeof(s->sdhci), TYPE_SYSBUS_SDHCI);
     object_property_add_child(obj, "sdhci", OBJECT(&s->sdhci), NULL);
@@ -265,6 +270,17 @@ static void bcm2835_peripherals_realize(DeviceState *dev, Error **errp)
 
     memory_region_add_subregion(&s->peri_mr, RNG_OFFSET,
                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->rng), 0));
+
+    /* Power management: upstream QEMU v6.2.0 bcm2835_peripherals.c wires it
+     * the same way, at PM_OFFSET. */
+    object_property_set_bool(OBJECT(&s->powermgt), true, "realized", &err);
+    if (err) {
+        error_propagate(errp, err);
+        return;
+    }
+
+    memory_region_add_subregion(&s->peri_mr, PM_OFFSET,
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->powermgt), 0));
 
     /* Extended Mass Media Controller
      *
