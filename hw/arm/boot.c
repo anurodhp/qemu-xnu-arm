@@ -1022,7 +1022,18 @@ static size_t macho_setup_bootargs(struct arm_boot_info *info, AddressSpace *as,
     boot_args.Version = xnu_arm64_kBootArgsVersion2;
     boot_args.virtBase = virt_base;
     boot_args.physBase = phys_base;
-    boot_args.memSize = info->ram_size;
+    /*
+     * XNU treats [physBase, physBase + memSize) as RAM it owns
+     * (osfmk/arm64/arm_vm_init.c:1740-1755, gPhysSize = memSize). physBase
+     * here is mem_base (0x1000000, arm_load_macho()), not the start of RAM,
+     * so memSize must be what is left of RAM above it. Passing all of
+     * info->ram_size put the range 16 MB past the end of ARM RAM, over the
+     * VideoCore framebuffer at ram_size (raspi.c:213 passes RAM minus
+     * vcram-size): XNU then handed framebuffer pages out as free RAM, and a
+     * user mapping of VRAM panicked in pmap_verify_free (DAR-358).
+     */
+    assert(info->loader_start + info->ram_size > phys_base);
+    boot_args.memSize = info->loader_start + info->ram_size - phys_base;
     // top of kernel data (kernel, dtb, any ramdisk) + boot args size + padding to 16k
     boot_args.topOfKernelData = ((top_of_kernel_data + sizeof(boot_args)) + 0xffffull) & ~0xffffull;
     // todo: video, machine type, flags
