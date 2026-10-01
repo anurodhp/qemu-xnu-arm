@@ -116,6 +116,16 @@ struct arm_boot_info {
     bool secure_board_setup;
 
     arm_endianness endianness;
+
+    /*
+     * DAR-455: XNU (Mach-O) boot only. When false (the default), every
+     * core but the first is halted at reset, as before. When true, a board
+     * that provides write_secondary_boot()/smp_loader_start (raspi3) gets
+     * its spin-table stub written and cores 1..n-1 start in it at EL2,
+     * the state the real Pi 3 firmware's armstub8 leaves them in, so the
+     * kernel can release them by writing the spin table.
+     */
+    bool xnu_smp;
 };
 
 /**

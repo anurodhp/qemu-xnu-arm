@@ -692,6 +692,28 @@ static void do_cpu_reset(void *opaque)
              * arm-powerctl.c uses) instead of racing into the kernel.
              */
             if (cs != first_cpu) {
+                if (info->xnu_smp && info->smp_loader_start) {
+                    /*
+                     * DAR-455 (opt-in, raspi3 "xnu-smp" machine
+                     * property): start this core in the board's spin-table
+                     * stub (write_smpboot64(), hw/arm/raspi.c) at EL2,
+                     * MMU off, which is the state the Pi 3 firmware's
+                     * armstub8 leaves cores 1-3 in: EL3 setup, eret to
+                     * EL2h, then `wfe; ldr x4, [0xd8 + 8*core]; cbz;
+                     * br x4` (raspberrypi/tools armstubs/armstub8.S
+                     * :122-161). SCR_EL3 value is the one the boot-CPU
+                     * path below uses (RES1|SMD|HCE|NS, RW=1); HCR_EL2 is
+                     * left at reset, as the firmware leaves it: the kernel
+                     * owns the EL2->EL1 drop for these cores.
+                     */
+                    if (env->aarch64 && arm_feature(env, ARM_FEATURE_EL3)
+                        && arm_feature(env, ARM_FEATURE_EL2)) {
+                        env->cp15.scr_el3 = 0x5B1;
+                        env->pstate = PSTATE_MODE_EL2h | PSTATE_DAIF;
+                    }
+                    cpu_set_pc(cs, info->smp_loader_start);
+                    return;
+                }
                 cs->halted = 1;
                 return;
             }
@@ -1490,6 +1512,16 @@ void arm_load_kernel(ARMCPU *cpu, struct arm_boot_info *info)
                                        do_arm_linux_init, info);
     }
     info->is_linux = is_linux;
+
+    /*
+     * DAR-455: for an XNU kernel with the opt-in xnu-smp property, write
+     * the same secondary spin-table stub the Linux path writes above, so
+     * do_cpu_reset() can start cores 1..n-1 in it instead of halting them.
+     */
+    if (!is_linux && info->xnu_smp && info->nb_cpus > 1
+        && info->write_secondary_boot) {
+        info->write_secondary_boot(cpu, info);
+    }
 
     for (cs = first_cpu; cs; cs = CPU_NEXT(cs)) {
         ARM_CPU(cs)->env.boot_info = info;

@@ -109,6 +109,26 @@ static void reset_secondary(ARMCPU *cpu, const struct arm_boot_info *info)
     cpu_set_pc(cs, info->smp_loader_start);
 }
 
+/*
+ * DAR-455: "-M raspi3,xnu-smp=on". Off by default, which keeps the XNU
+ * boot path's long-standing behaviour of halting cores 1-3 at reset
+ * (hw/arm/boot.c do_cpu_reset()). On, cores 1-3 instead start in
+ * write_smpboot64()'s spin-table stub at EL2, as on a real Pi 3, and an
+ * SMP-capable kernel releases them through the 0xd8 spin table. Only one
+ * machine exists per process, so a file-scope flag is enough.
+ */
+static bool raspi_xnu_smp;
+
+static bool raspi_get_xnu_smp(Object *obj, Error **errp)
+{
+    return raspi_xnu_smp;
+}
+
+static void raspi_set_xnu_smp(Object *obj, bool value, Error **errp)
+{
+    raspi_xnu_smp = value;
+}
+
 static void setup_boot(MachineState *machine, int version, size_t ram_size)
 {
     static struct arm_boot_info binfo;
@@ -140,6 +160,7 @@ static void setup_boot(MachineState *machine, int version, size_t ram_size)
             binfo.write_secondary_boot = write_smpboot64;
         }
         binfo.secondary_cpu_reset_hook = reset_secondary;
+        binfo.xnu_smp = (version == 3) && raspi_xnu_smp;
     }
 
     /* If the user specified a "firmware" image (e.g. UEFI), we bypass
@@ -244,6 +265,12 @@ static void raspi3_machine_init(MachineClass *mc)
 {
     mc->desc = "Raspberry Pi 3";
     mc->init = raspi3_init;
+    object_class_property_add_bool(OBJECT_CLASS(mc), "xnu-smp",
+                                   raspi_get_xnu_smp, raspi_set_xnu_smp,
+                                   &error_abort);
+    object_class_property_set_description(OBJECT_CLASS(mc), "xnu-smp",
+        "Start cores 1-3 in the spin-table stub at EL2 for an XNU kernel "
+        "(default off: halted)", &error_abort);
     mc->block_default_type = IF_SD;
     mc->no_parallel = 1;
     mc->no_floppy = 1;
