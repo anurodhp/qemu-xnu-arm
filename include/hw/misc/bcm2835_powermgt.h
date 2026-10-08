@@ -29,6 +29,8 @@ typedef struct BCM2835PowerMgtState {
     uint32_t rstc;
     uint32_t rsts;
     uint32_t wdog;
+    uint32_t grafx;           /* PM_GRAFX (0x10c), V3D domain, see bcm2835_v3d.c */
+    bool grafx_boot_powered;  /* firmware left GRAFX powered (the real behaviour) */
 } BCM2835PowerMgtState;
 
 #endif

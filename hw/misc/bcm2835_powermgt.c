@@ -16,6 +16,7 @@
 #include "qemu/module.h"
 #include "hw/misc/bcm2835_powermgt.h"
 #include "migration/vmstate.h"
+#include "hw/misc/bcm2835_v3d.h"
 /* Upstream: sysemu/runstate.h. In 2.12 the shutdown/reset requests are here. */
 #include "sysemu/sysemu.h"
 
@@ -27,6 +28,14 @@
 #define R_RSTS 0x20
 #define V_RSTS_POWEROFF 0x555 /* Linux uses partition 63 to indicate halt. */
 #define R_WDOG 0x24
+#define R_GRAFX 0x10c
+/* PM_GRAFX bits (drivers/pmdomain/bcm/bcm2835-power.c) */
+#define GRAFX_POWUP  (1u << 0)
+#define GRAFX_POWOK  (1u << 1)
+#define GRAFX_ISPOW  (1u << 2)
+#define GRAFX_MEMREP (1u << 3)
+#define GRAFX_MRDONE (1u << 4)
+#define GRAFX_ISFUNC (1u << 5)
 
 static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
                                       unsigned size)
@@ -43,6 +52,11 @@ static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
         break;
     case R_WDOG:
         res = s->wdog;
+        break;
+    case R_GRAFX:
+        /* the handshake bits follow the request bits at once */
+        res = s->grafx | ((s->grafx & GRAFX_POWUP) ? GRAFX_POWOK : 0)
+                       | ((s->grafx & GRAFX_MEMREP) ? GRAFX_MRDONE : 0);
         break;
 
     default:
@@ -92,6 +106,10 @@ static void bcm2835_powermgt_write(void *opaque, hwaddr offset,
                       "bcm2835_powermgt_write: WDOG\n");
         s->wdog = value;
         break;
+    case R_GRAFX:
+        s->grafx = value & ~(GRAFX_POWOK | GRAFX_MRDONE);
+        bcm2835_v3d_pm_changed(s->grafx);
+        break;
 
     default:
         qemu_log_mask(LOG_UNIMP,
@@ -138,13 +156,22 @@ static void bcm2835_powermgt_reset(DeviceState *dev)
     s->rstc = 0x00000102;
     s->rsts = 0x00001000;
     s->wdog = 0x00000000;
+    /* The firmware powers the GRAFX domain at boot; V3D itself is held in
+     * reset (V3DRSTN clear) until a driver releases it. */
+    s->grafx = s->grafx_boot_powered ? (GRAFX_POWUP | GRAFX_ISPOW | GRAFX_ISFUNC) : 0;
 }
+
+static Property bcm2835_powermgt_props[] = {
+    DEFINE_PROP_BOOL("grafx-boot-powered", BCM2835PowerMgtState, grafx_boot_powered, true),
+    DEFINE_PROP_END_OF_LIST(),
+};
 
 static void bcm2835_powermgt_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->reset = bcm2835_powermgt_reset;
+    dc->props = bcm2835_powermgt_props;
     dc->vmsd = &vmstate_bcm2835_powermgt;
 }
 

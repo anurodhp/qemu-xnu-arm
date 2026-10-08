@@ -134,6 +134,14 @@ static void bcm2835_peripherals_init(Object *obj)
 
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(&s->gpu_bus_mr), &error_abort);
+
+    /* VideoCore IV 3D test model (DARW-295, hw/misc/bcm2835_v3d.c): reads
+     * command lists from GPU bus addresses like the DWC2 does. */
+    object_initialize(&s->v3d, sizeof(s->v3d), TYPE_BCM2835_V3D);
+    object_property_add_child(obj, "v3d", OBJECT(&s->v3d), NULL);
+    qdev_set_parent_bus(DEVICE(&s->v3d), sysbus_get_default());
+    object_property_add_const_link(OBJECT(&s->v3d), "dma-mr",
+                                   OBJECT(&s->gpu_bus_mr), &error_abort);
 }
 
 static void bcm2835_peripherals_realize(DeviceState *dev, Error **errp)
@@ -339,6 +347,21 @@ static void bcm2835_peripherals_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dwc2), 0,
         qdev_get_gpio_in_named(DEVICE(&s->ic), BCM2835_IC_GPU_IRQ,
                                INTERRUPT_USB));
+
+    /* V3D: the ASB bridges (peripheral offset 0xa000, bus 0x7e00a000) and the
+     * 3D block (0xc00000, bus 0x7ec00000), IRQ 74 = GPU bank 1 bit 10. */
+    object_property_set_bool(OBJECT(&s->v3d), true, "realized", &err);
+    if (err) {
+        error_propagate(errp, err);
+        return;
+    }
+    memory_region_add_subregion(&s->peri_mr, 0xc00000,
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->v3d), 0));
+    memory_region_add_subregion(&s->peri_mr, 0xa000,
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->v3d), 1));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->v3d), 0,
+        qdev_get_gpio_in_named(DEVICE(&s->ic), BCM2835_IC_GPU_IRQ,
+                               INTERRUPT_3D));
 
     /* DMA Channels */
     object_property_set_bool(OBJECT(&s->dma), true, "realized", &err);

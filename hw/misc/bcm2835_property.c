@@ -6,6 +6,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/misc/bcm2835_property.h"
+#include "hw/misc/bcm2835_v3d.h"
 #include "hw/misc/bcm2835_mbox_defs.h"
 #include "sysemu/dma.h"
 #include "qemu/log.h"
@@ -95,11 +96,17 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             resplen = 8;
             break;
 
-        case 0x00038001: /* Set clock state */
-            qemu_log_mask(LOG_UNIMP,
-                          "bcm2835_property: %x set clock state NYI\n", tag);
+        case 0x00038001: { /* Set clock state: {id, state} */
+            uint32_t clk_id = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t clk_state = ldl_le_phys(&s->dma_as, value + 16);
+
+            stl_le_phys(&s->dma_as, value + 16, clk_state & 1);  /* present, now in that state */
+            if (clk_id == 5) {                                    /* RPI_FIRMWARE_V3D_CLK_ID */
+                bcm2835_v3d_set_clock(clk_state & 1);
+            }
             resplen = 8;
             break;
+        }
 
         case 0x00030002: /* Get clock rate */
         case 0x00030004: /* Get max clock rate */
