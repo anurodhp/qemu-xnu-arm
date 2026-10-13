@@ -116,7 +116,14 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
                 stl_le_phys(&s->dma_as, value + 16, 50000000);
                 break;
             case 2: /* UART */
-                stl_le_phys(&s->dma_as, value + 16, 3000000);
+                /*
+                 * 48 MHz, what a real Pi 3's firmware reports for the PL011
+                 * clock (Circle lib/machineinfo.cpp GetClockRate():
+                 * CLOCK_ID_UART = 48000000 for RASPPI <= 4). 3 MHz
+                 * caps the baud at 187500 and makes the BT driver's 921600
+                 * divisor 0 (iokit docs/bluetooth-plan.md).
+                 */
+                stl_le_phys(&s->dma_as, value + 16, 48000000);
                 break;
             default:
                 stl_le_phys(&s->dma_as, value + 16, 700000000);
@@ -265,6 +272,65 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             }
             stl_le_phys(&s->dma_as, value + 12, 0);
             resplen = 4;
+            break;
+
+        case 0x00030041: /* Get GPIO state (firmware expander GPIO) */
+        case 0x00038041: /* Set GPIO state */
+            /*
+             * Request {u32 gpio, u32 state}; the firmware overwrites the
+             * first word with a status, 0 = success (Linux
+             * drivers/gpio/gpio-raspberrypi-exp.c rpi_exp_gpio_set():
+             * `if (ret || set.gpio != 0)` is failure). No expander lines are
+             * modelled (BT_ON = 128, WL_ON = 129 on the Pi 3B): accept the
+             * write, read back the last state set.
+             */
+            {
+                uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+                uint32_t state = ldl_le_phys(&s->dma_as, value + 16);
+                if (gpio >= 128 && gpio < 136) {
+                    if (tag == 0x00038041) {
+                        s->expgpio[gpio - 128] = state;
+                    }
+                    stl_le_phys(&s->dma_as, value + 16, s->expgpio[gpio - 128]);
+                    stl_le_phys(&s->dma_as, value + 12, 0);
+                }
+            }
+            resplen = 8;
+            break;
+
+        case 0x00030043: /* Get GPIO config (firmware expander GPIO) */
+            /*
+             * {u32 gpio, direction, polarity, term_en, term_pull_up}; first
+             * word becomes the status, 0 = success. Report output, normal
+             * polarity, no termination.
+             */
+            {
+                uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+                if (gpio >= 128 && gpio < 136) {
+                    stl_le_phys(&s->dma_as, value + 12, 0);
+                    stl_le_phys(&s->dma_as, value + 16, 1);
+                    stl_le_phys(&s->dma_as, value + 20, 0);
+                    stl_le_phys(&s->dma_as, value + 24, 0);
+                    stl_le_phys(&s->dma_as, value + 28, 0);
+                }
+            }
+            resplen = 20;
+            break;
+
+        case 0x00038043: /* Set GPIO config */
+            /*
+             * {u32 gpio, direction, polarity, term_en, term_pull_up, state}
+             * (Linux gpio-raspberrypi-exp.c struct gpio_set_config, what
+             * rpi_exp_gpio_dir_out() sends). Records the output state.
+             */
+            {
+                uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+                if (gpio >= 128 && gpio < 136) {
+                    s->expgpio[gpio - 128] = ldl_le_phys(&s->dma_as, value + 32);
+                    stl_le_phys(&s->dma_as, value + 12, 0);
+                }
+            }
+            resplen = 24;
             break;
 
         case 0x00060001: /* Get DMA channels */

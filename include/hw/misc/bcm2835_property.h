@@ -29,6 +29,7 @@ typedef struct {
     uint32_t board_rev;
     uint32_t addr;
     bool pending;
+    uint32_t expgpio[8];    /* firmware expander GPIO 128-135, last state set */
 } BCM2835PropertyState;
 
 #endif
